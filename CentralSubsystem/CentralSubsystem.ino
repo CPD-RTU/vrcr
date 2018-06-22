@@ -9,8 +9,14 @@ enum Command {
   FORWARD_CMD = 3,
   LEFT_TURN_CMD = 4,
   RIGHT_TURN_CMD = 5,
-  AUTOPILOT_CMD = 6
+  AUTOPILOT_CMD = 6,
+  SPEED_CMD = 7
 };
+enum Maneuver {
+  LEFT_MVR,
+  RIGHT_MVR
+};
+
 
 Command currentCommand; //команда, которая выполняется в данный момент
 bool isAutopilot = false; //текущий режим: автопилот/ручное управление
@@ -29,10 +35,13 @@ AF_DCMotor m_FR(3, MOTOR34_64KHZ);
 AF_DCMotor m_BL(1, MOTOR12_64KHZ);
 AF_DCMotor m_BR(2, MOTOR12_64KHZ);
 
-float distL, distC, distR, distB, distSL, distSR;
-unsigned int sFL, sFR, sBL, sBR;
+float distL, lastDistC, distC, distR, distSideR, distSideL, distB;
+unsigned int balancer = 11; //количество циклов прямой езды
+Maneuver lastManeuver; //последний манёвр
+int direction = 0; //текущий курс относительно начального. Стремится к нулю
 volatile int inc = 0;
 volatile int path = 0;
+int currentSpeed = 3;
 
 void incFunc(){
   inc++;
@@ -73,6 +82,8 @@ void dvig (int sFL, int sFR,int sBL,int sBR) {
   m_BR.setSpeed(sBR);
 }
 void ultrazvuk(){
+  lastDistC=distC;
+  
   distL = sonarL.ping_cm();
   if(distL==0) distL=150;
   distC = sonarC.ping_cm();
@@ -81,49 +92,92 @@ void ultrazvuk(){
   if(distR==0) distR=150;
   distB = sonarB.ping_cm();
   if(distB==0) distB=150;
-  distSL = sonarB.ping_cm();
-  if(distSL==0) distSL=150;
-  distSR = sonarSR.ping_cm();
-  if(distSR==0) distSR=150;
+  distSideL = sonarSL.ping_cm();
+  if(distSideL==0) distSideL=150;
+  distSideR = sonarSR.ping_cm();
+  if(distSideR==0) distSideR=150;
 }
 
-void m_speed(){
-  dvig (150,150,150,150);
-  if  (distC <= 20){                                  // объезд препятствия и движение вдоль преграды
-          dvig(0,0,0,0);
-          delay(1000);
-            if (distL >= 8 && distSL >= 15 && distSR >= 10) {                                 // поворот на 90гр влево
-                  turnLEFT();
-                  dvig(200,200,200,200);
-                  delay(700);
-                  turnRIGHT();
-                  delay(700);}}
-
-if (distC < 10 || distL < 10 || distR < 10){ // экстремальная остановка 
- sFL = 0; 
- sFR = 0; 
- sBL = 0; 
- sBR = 0;} 
- 
-dvig(sFL, sFR, sBL, sBR);
+//Можно ли совершить определённый манёвр. Во избежание неконтролируемых поворотов, нельзя менять направление поворота до прямолинейной траектории
+bool canPerfomManeuver(Maneuver maneuver) {
+  if(maneuver==LEFT_MVR){
+    return lastManeuver==LEFT_MVR || balancer>10;
+  }
+  else{
+    return lastManeuver==RIGHT_MVR || balancer>10;
+  }
 }
-void turnLEFT(){ // поворот на 90 гр влево 
- sFR = 220; 
- sFL = -220; 
- sBR = 220; 
- sBL = -220; 
- dvig(sFR,sFL,sBL,sBR);
- delay(500); 
- 
+
+//Движение вперёд с поправкой скорости при приближении к препятствию
+void straight() {
+  //Средняя скорость
+  int avgSpeed = 95 - 700/distC;
+  if(distC<20 && lastDistC>distC) {
+    avgSpeed-=min((lastDistC-distC)*5,30);
+  }
+
+  /*int distSide = min(distSideL,distSideR);
+  if(distSide<6){ //Разные скорости по бокам, если боковое препятствие близко
+    int diff = 50/distSide;
+    if(distSideL<distSideR) {
+      dvig(avgSpeed+diff,avgSpeed-diff,avgSpeed+diff,avgSpeed-diff);
+    }
+    else {
+      dvig(avgSpeed-diff,avgSpeed+diff,avgSpeed-diff,avgSpeed+diff);
+    }
+  }
+  else{*/
+    dvig(avgSpeed,avgSpeed,avgSpeed,avgSpeed);
+  //}
+  balancer++;
+}
+
+//Поворот на определённое количество градусов. Положительное направление - по часовой стрелке
+void turn(int degree){
+  if(degree<0) {
+    dvig(-150,150,-150,150);
+    lastManeuver=LEFT_MVR;
+    direction--;
+  }
+  else {
+    dvig(150,-150,150,-150);
+    lastManeuver=RIGHT_MVR;
+    direction++;
+  }
+  balancer=0;
+  delay(4.2*abs(degree));
 } 
-void turnRIGHT(){ // поворот на 90 гр вправо 
- 
- sFR = -220; 
- sFL = 220; 
- sBR = -220; 
- sBL = 220; 
- dvig(sFR,sFL,sBL,sBR);
- delay(500); 
+
+void m_speed (){
+  if(distL > 8 && distC > 20 && distR > 8) { //Путь свободен
+    if(distSideL > 25 && direction>0 && canPerfomManeuver(LEFT_MVR)){ //Возвращение направления при перекосе вправо
+      turn(-10);
+    }
+    else if(distSideR > 25 && direction<0 && canPerfomManeuver(RIGHT_MVR)) { //Возвращение направления при перекосе влево
+      turn(10);
+    }
+    else { //Движение вперёд, медленно приближаясь к препятствию
+      straight();
+    }
+  }
+  else if(distSideL > 10 || distSideR > 10) { //Поворот
+    uint8_t left = ((uint8_t)(canPerfomManeuver(LEFT_MVR) && distSideL > 10) << 2) + ((uint8_t)(direction > 3) << 1)  + (uint8_t)(distSideL>=distSideR);
+    uint8_t right = ((uint8_t)(canPerfomManeuver(RIGHT_MVR) && distSideR > 10) << 2) + ((uint8_t)(direction < -3) << 1)  + (uint8_t)(distSideL<distSideR);
+    Serial.print(left);
+    Serial.println(right);
+    if(left>3 && left >= right){
+      turn(-10);
+    }
+    else if (right>3){
+      turn(10);
+    }
+    else {
+      dvig(0,0,0,0);
+    }
+  }
+  else { //Остановка
+    dvig(0,0,0,0);
+  }
 }
 
 
@@ -133,7 +187,10 @@ bool tryApplyManualCommand(Command command) {
   switch(command) {
     case FORWARD_CMD:
     if(distC>7&&distL>10&&distR>10) {
-      int speed = 120 - 1000/distC;
+      int speed = 70 + currentSpeed*30 - 1000/distC;
+      if(distC<20 && lastDistC>distC) {
+        speed-=min((lastDistC-distC)*5,30);
+      }
       dvig(speed,speed,speed,speed);
       isSuccess = true;
     }
@@ -141,7 +198,7 @@ bool tryApplyManualCommand(Command command) {
     
     case BACKWARD_CMD:
     if(distB>10) {
-      int speed = -120 + 1000/distB;
+      int speed = -70 - currentSpeed*30 + 1000/distB;
       dvig(speed,speed,speed,speed);
       isSuccess = true;
     }
@@ -149,14 +206,16 @@ bool tryApplyManualCommand(Command command) {
     
     case LEFT_TURN_CMD:
     if(distC>5&&distL>8) {
-      dvig(-220,220,-220,220);
+      int speed = 100 + currentSpeed*24;
+      dvig(-speed,speed,-speed,speed);
       isSuccess = true;
     }
     break;
 
     case RIGHT_TURN_CMD:
     if(distC>5&&distR>8) {
-      dvig(220,-220,220,-220);
+      int speed = 100 + currentSpeed*24;
+      dvig(speed,-speed,speed,-speed);
       isSuccess = true;
     }
     break;
@@ -184,6 +243,7 @@ void setup() {
   Serial1.begin(9600); //EasyVR
   Serial2.begin(115200); //ESP8266
   currentCommand = STOP_CMD;
+  ultrazvuk(); //для вычисление последнего расстояния по центральной оси
   //timer.Every(2000,sendMotionState);
   //attachInterrupt(0,incFunc,FALLING);
 }
@@ -195,15 +255,22 @@ void loop() {
   if(Serial1.available()>0) {
     uint8_t data = Serial1.read();
     data-=48;
-    if(data < 7) {
+    if(data < 8) {
       currentCommand = (Command)data;
     }
   }
   else if(Serial2.available()>0) {
     uint8_t data = Serial2.read();
     data-=48;
-    if(data < 7) {
+    if(data < 8) {
       currentCommand = (Command)data;
+    }
+    if(currentCommand==SPEED_CMD) {
+      data = Serial2.read();
+      data-=48;
+      if(data < 6) {
+        currentSpeed = data;
+      }
     }
   }
   
@@ -215,6 +282,8 @@ void loop() {
     }
     else{
       isAutopilot = true;
+      balancer = 11;
+      direction = 0;
       currentCommand = NONE_CMD;
     }
   }
